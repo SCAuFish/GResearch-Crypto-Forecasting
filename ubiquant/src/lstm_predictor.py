@@ -1,7 +1,12 @@
+import json
+import os
+from concurrent.futures._base import wait
+from concurrent.futures.thread import ThreadPoolExecutor
+
 import torch.nn as nn
 import torch
 from torch.utils.data import DataLoader
-import os
+import argparse
 from tqdm import tqdm
 from typing import List
 from data_loader import AssetSerialData
@@ -99,9 +104,6 @@ def evaluate(model, data_loader, device):
             x, t = batch[:, :, 1:], batch[:, -1, 0]
             pred = model(x)
 
-            loss = loss_fn(pred, t)
-            total_loss += loss
-
             prediction.append(pred)
             target.append(t)
 
@@ -123,39 +125,75 @@ def save_checkpoint(model, epoch, name):
     torch.save(model.state_dict(), f"../model/{name}-{epoch}.bin")
 
 
-device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 # torch.distributed.init_process_group()
 
-# data_filename = "../data/combined-processed-time-series-train-length-5.pkl"
-# dataset = AssetSerialData(data_filename, 5)
-# data_loader = DataLoader(dataset, batch_size=64, shuffle=False)
-epoch = 500
+data_filename = "../data/combined-processed-time-series-train-length-5.pkl"
+dataset = AssetSerialData(data_filename, 5)
 
 test_data_filename = "../data/combined-processed-time-series-test-length-5.pkl"
 test_dataset = AssetSerialData(test_data_filename, 5)
-test_data_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-model = LSTMModel(
-    input_dim=300, layer_dim=2, hidden_dim=128, fc_dim=[128, 128, 128, 64], output_dim=1, dropout_prob=0.1,
-    bidirectional=False).to(device)
-# print(model)
-optim = torch.optim.Adam(model.parameters(), lr=0.0005)
-loss_fn = nn.MSELoss()
 
-min_loss = 1000
-max_corr = -1
-for e in range(epoch):
-    print(f"Training {e}th epoch")
-    # loss = train(data_loader, model, optim, loss_fn, device=device)
-    loss = train(test_data_loader, model, optim, loss_fn, device=device)
-    print(f"loss: {loss}")
+# ------------------------------------------------------------------
+# codes above should be fixed through experiments
+# ------------------------------------------------------------------
+# configurable parameters for hyper-param search start below
+# ------------------------------------------------------------------
+def experiment(exp_name, epoch=500, bidirectional=False, learning_rate=0.0005, loss_fn='MSELoss', device='cuda:0'):
+    writer = open(f'logs/{exp_name}.log', 'w')
+    device = torch.device(device) if torch.cuda.is_available() else torch.device('cpu')
+    data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    test_data_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-    corr = evaluate(model, test_data_loader, device=device)
-    corr = corr[0][1]
-    print(f"corr coef: {corr}")
-    #
-    # if is_better_model(loss, corr, min_loss, max_corr):
-    #     print(f"saving model")
-    #     save_checkpoint(model, e, "lstm-baseline")
-    #     min_loss = loss
-    #     max_corr = corr
+    model = LSTMModel(
+        input_dim=300, layer_dim=2, hidden_dim=128, fc_dim=[128, 128, 128, 64], output_dim=1, dropout_prob=0.1,
+        bidirectional=bidirectional).to(device)
+
+    # print(model)
+    optim = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    if loss_fn == 'MSELoss':
+        loss_fn = nn.MSELoss()
+    elif loss_fn == 'L1Loss':
+        loss_fn = nn.L1Loss()
+
+    min_loss = 1000
+    max_corr = -1
+    for e in range(epoch):
+        print(f"Training {e}th epoch", file=writer)
+        loss = train(data_loader, model, optim, loss_fn, device=device)
+        # loss = train(test_data_loader, model, optim, loss_fn, device=device)
+        print(f"loss: {loss}", file=writer)
+
+        corr = evaluate(model, test_data_loader, device=device)
+        corr = corr[0][1]
+        print(f"corr coef: {corr}", file=writer)
+
+        if is_better_model(loss, corr, min_loss, max_corr) and e > 25:
+            print(f"saving model", file=writer)
+            save_checkpoint(model, e, exp_name)
+            min_loss = loss
+            max_corr = corr
+
+    writer.close()
+
+
+def get_params(config):
+    kwargs = []
+    for i, (name, options) in enumerate(config.items()):
+        options['exp_name'] = name
+        options['device'] = f'cuda:{i}'
+
+        kwargs.append(options)
+
+    return kwargs
+
+
+experiment_config = "lstm-baseline.json"
+config = json.load(open(experiment_config, 'r'))
+options = get_params(config)
+with ThreadPoolExecutor() as executor:
+    futures = []
+    for option in options:
+        futures.append(executor.submit(experiment, **option))
+    wait(futures)
+
