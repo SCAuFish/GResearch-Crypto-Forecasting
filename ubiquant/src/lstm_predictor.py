@@ -174,6 +174,8 @@ def experiment(exp_name, epoch=500, bidirectional=False, learning_rate=0.0005, l
             min_loss = loss
             max_corr = corr
 
+        writer.flush()
+
     writer.close()
 
 
